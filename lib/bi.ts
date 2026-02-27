@@ -26,20 +26,22 @@ export type PipelineMetricsResult = {
 };
 
 const SECTOR_ALIASES: Record<string, string[]> = {
-  energy: ["energy", "oil", "gas", "renewable", "utilities", "solar", "wind"],
-  healthcare: ["healthcare", "health care", "medical", "pharma", "biotech"],
-  technology: ["technology", "tech", "software", "saas"],
-  finance: ["finance", "financial", "fintech", "banking"],
-  manufacturing: ["manufacturing", "industrial"],
-  retail: ["retail", "ecommerce", "e-commerce", "consumer"],
-  logistics: ["logistics", "transport", "transportation", "supply chain"],
-  "real estate": ["real estate", "property", "proptech"],
-  education: ["education", "edtech"],
-  telecom: ["telecom", "telecommunications"],
-  agriculture: ["agriculture", "agri", "farming"],
-  hospitality: ["hospitality", "travel", "hotel", "tourism"],
-  media: ["media", "advertising", "adtech"],
-  automotive: ["automotive", "auto"]
+  mining: ["mining", "mine"],
+  powerline: ["powerline", "power line", "power-line", "transmission"],
+  renewables: ["renewables", "renewable", "solar", "wind", "green energy"],
+  railways: ["railways", "railway", "rail", "railroad"],
+  construction: ["construction", "build", "infrastructure", "infra"],
+  dsp: ["dsp", "drone service provider", "drone services"],
+  aviation: ["aviation", "airport", "airspace", "aerospace"],
+  security: [
+    "security",
+    "surveillance",
+    "security and surveillance",
+    "monitoring"
+  ],
+  tender: ["tender"],
+  manufacturing: ["manufacturing", "factory", "plant", "industrial"],
+  others: ["others", "other"]
 };
 
 const STATUS_PATTERNS: Array<{ canonical: string; regex: RegExp }> = [

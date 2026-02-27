@@ -1,4 +1,4 @@
-const CURRENCY_SYMBOLS = ["$", "\u20AC", "\u00A3", "\u00A5"];
+const CURRENCY_SYMBOLS = ["$", "€", "£", "¥", "₹"];
 
 export function normalizeNumber(input: string | number | null | undefined): number | null {
   if (input === null || input === undefined) return null;

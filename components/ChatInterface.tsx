@@ -17,11 +17,14 @@ type ChatMessage = {
 };
 
 const suggestedQuestions = [
-  "How's our pipeline looking for the energy sector this quarter?",
-  "What's the total value of open work orders?",
-  "Which deals are at risk of missing their close date?",
-  "Show me revenue breakdown by sector",
-  "What's our win rate this month?"
+  "Give me a full pipeline overview",
+  "How is the Mining sector performing?",
+  "What is our billing and receivables health?",
+  "Which deals are closing in the next 60 days?",
+  "Show work order execution status across all sectors",
+  "Revenue breakdown by sector from work orders",
+  "Team performance ranked by BD owner",
+  "Which completed work orders have not been billed yet?"
 ];
 
 export function ChatInterface() {
