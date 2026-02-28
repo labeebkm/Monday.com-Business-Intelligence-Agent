@@ -62,6 +62,18 @@ type DeterministicBiResult = {
   filteredCount: number;
 };
 
+type OpenAIErrorLike = {
+  status?: number;
+  code?: string | null;
+  type?: string | null;
+  message?: string;
+  error?: {
+    message?: string;
+    code?: string | null;
+    type?: string | null;
+  };
+};
+
 function getLatestUserQuery(messages: ClientMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     if (messages[i].role === "user" && messages[i].content.trim()) {
@@ -175,6 +187,108 @@ function isFunctionToolCall(value: unknown): value is LlmToolCall {
   );
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseOpenAIError(err: unknown): {
+  status: number;
+  code?: string;
+  type?: string;
+  message: string;
+} {
+  const fallback = {
+    status: 500,
+    message: "OpenAI request failed unexpectedly."
+  };
+
+  if (!err || typeof err !== "object") {
+    return fallback;
+  }
+
+  const e = err as OpenAIErrorLike;
+  const status = typeof e.status === "number" ? e.status : 500;
+  const code = (e.code ?? e.error?.code ?? undefined) || undefined;
+  const type = (e.type ?? e.error?.type ?? undefined) || undefined;
+  const message =
+    e.message ??
+    e.error?.message ??
+    "OpenAI request failed. Please check API key, quota, and network.";
+
+  return { status, code, type, message };
+}
+
+function shouldRetryOpenAI(err: unknown, attempt: number, maxRetries: number): boolean {
+  if (attempt >= maxRetries) return false;
+  const parsed = parseOpenAIError(err);
+
+  // Quota exhaustion should not be retried.
+  if (parsed.code === "insufficient_quota" || parsed.type === "insufficient_quota") {
+    return false;
+  }
+
+  // Retry transient rate limits and service instability.
+  return parsed.status === 429 || parsed.status >= 500;
+}
+
+async function createChatCompletionWithRetry(
+  openaiClient: ReturnType<typeof getOpenAIClient>,
+  request: Record<string, unknown>
+) {
+  const maxRetries = 2;
+  let attempt = 0;
+  let delayMs = 500;
+
+  while (true) {
+    try {
+      return await openaiClient.chat.completions.create(request as any);
+    } catch (err: unknown) {
+      if (!shouldRetryOpenAI(err, attempt, maxRetries)) {
+        throw err;
+      }
+
+      await sleep(delayMs);
+      attempt += 1;
+      delayMs *= 2;
+    }
+  }
+}
+
+function responseForOpenAIError(err: unknown): Response {
+  const parsed = parseOpenAIError(err);
+
+  let status = parsed.status || 500;
+  let error = parsed.message;
+
+  if (parsed.code === "insufficient_quota" || parsed.type === "insufficient_quota") {
+    status = 429;
+    error =
+      "OpenAI quota exceeded for this API key. Update billing/limits or use a key with available quota.";
+  } else if (parsed.status === 429) {
+    status = 429;
+    error = "OpenAI rate limit reached. Please retry in a few seconds.";
+  } else if (parsed.status === 401) {
+    status = 401;
+    error = "OpenAI authentication failed. Check OPENAI_API_KEY.";
+  } else if (parsed.status >= 500) {
+    status = 503;
+    error = "OpenAI service is temporarily unavailable. Please retry shortly.";
+  }
+
+  return new Response(
+    JSON.stringify({
+      error,
+      provider: "openai",
+      code: parsed.code ?? null,
+      type: parsed.type ?? null
+    }),
+    {
+      status,
+      headers: { "Content-Type": "application/json" }
+    }
+  );
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
   if (!body || !Array.isArray(body.messages)) {
@@ -209,222 +323,226 @@ export async function POST(req: NextRequest) {
     ...llmMessages
   ];
 
-  for (let i = 0; i < 8; i += 1) {
-    const response = await openaiClient.chat.completions.create({
-      model: OPENAI_MODEL,
-      max_tokens: 4096,
-      temperature: 0,
-      tools: toolDefinitions,
-      tool_choice: "auto",
-      messages: toolLoopMessages as any
-    });
+  try {
+    for (let i = 0; i < 8; i += 1) {
+      const response = await createChatCompletionWithRetry(openaiClient, {
+        model: OPENAI_MODEL,
+        max_tokens: 4096,
+        temperature: 0,
+        tools: toolDefinitions,
+        tool_choice: "auto",
+        messages: toolLoopMessages as any
+      });
 
-    const assistantMessage = response.choices?.[0]?.message;
-    if (!assistantMessage) {
-      throw new Error("OpenAI did not return an assistant message.");
-    }
+      const assistantMessage = response.choices?.[0]?.message;
+      if (!assistantMessage) {
+        throw new Error("OpenAI did not return an assistant message.");
+      }
 
-    const toolCalls = assistantMessage.tool_calls ?? [];
-    if (!toolCalls.length) {
-      resultMessage = assistantMessage.content ?? "";
-      break;
-    }
-    const functionToolCalls = toolCalls.filter(isFunctionToolCall);
-    if (!functionToolCalls.length) {
-      throw new Error("OpenAI returned tool calls in an unsupported format.");
-    }
+      const toolCalls = assistantMessage.tool_calls ?? [];
+      if (!toolCalls.length) {
+        resultMessage = assistantMessage.content ?? "";
+        break;
+      }
+      const functionToolCalls = toolCalls.filter(isFunctionToolCall);
+      if (!functionToolCalls.length) {
+        throw new Error("OpenAI returned tool calls in an unsupported format.");
+      }
 
-    const toolResults: { tool_call_id: string; output: unknown }[] = [];
+      const toolResults: { tool_call_id: string; output: unknown }[] = [];
 
-    for (const toolCall of functionToolCalls) {
-      const toolName = toolCall.function.name;
-      let args: Record<string, unknown>;
+      for (const toolCall of functionToolCalls) {
+        const toolName = toolCall.function.name;
+        let args: Record<string, unknown>;
 
-      try {
-        args = parseToolArguments(toolCall.function.arguments ?? "{}");
-      } catch (err: unknown) {
-        const parseError = err instanceof Error ? err.message : String(err);
-        traces.push({
+        try {
+          args = parseToolArguments(toolCall.function.arguments ?? "{}");
+        } catch (err: unknown) {
+          const parseError = err instanceof Error ? err.message : String(err);
+          traces.push({
+            id: toolCall.id,
+            name: toolName,
+            args: {},
+            endpoint: "openai tool-calling",
+            success: false,
+            error: `Invalid tool arguments JSON: ${parseError}`
+          });
+          toolResults.push({
+            tool_call_id: toolCall.id,
+            output: { error: `Invalid tool arguments JSON: ${parseError}` }
+          });
+          continue;
+        }
+
+        const traceBase: ToolCallTrace = {
           id: toolCall.id,
           name: toolName,
-          args: {},
-          endpoint: "openai tool-calling",
-          success: false,
-          error: `Invalid tool arguments JSON: ${parseError}`
-        });
-        toolResults.push({
-          tool_call_id: toolCall.id,
-          output: { error: `Invalid tool arguments JSON: ${parseError}` }
-        });
-        continue;
-      }
+          args,
+          endpoint: "",
+          success: false
+        };
 
-      const traceBase: ToolCallTrace = {
-        id: toolCall.id,
-        name: toolName,
-        args,
-        endpoint: "",
-        success: false
-      };
+        try {
+          if (toolName === "get_board_items") {
+            const boardId = String(args.board_id);
+            const limit = typeof args.limit === "number" ? args.limit : 100;
+            const cursor = (args.cursor as string | null) ?? null;
 
-      try {
-        if (toolName === "get_board_items") {
-          const boardId = String(args.board_id);
-          const limit = typeof args.limit === "number" ? args.limit : 100;
-          const cursor = (args.cursor as string | null) ?? null;
+            const itemsPage = await getBoardItems({
+              boardId,
+              limit,
+              cursor
+            });
 
-          const itemsPage = await getBoardItems({
-            boardId,
-            limit,
-            cursor
-          });
+            const { normalized, summary } = normalizeItems(itemsPage.items);
+            traces.push({
+              ...traceBase,
+              endpoint: "monday.com GraphQL: boards.items_page",
+              success: true,
+              rawSample: itemsPage.items.slice(0, 3),
+              normalizationSummary: summary
+            });
 
-          const { normalized, summary } = normalizeItems(itemsPage.items);
-          traces.push({
-            ...traceBase,
-            endpoint: "monday.com GraphQL: boards.items_page",
-            success: true,
-            rawSample: itemsPage.items.slice(0, 3),
-            normalizationSummary: summary
-          });
+            const bi = runDeterministicBiComputation({
+              query: latestUserQuery,
+              normalizedItems: normalized,
+              summary,
+              traces,
+              traceIdPrefix: toolCall.id
+            });
 
-          const bi = runDeterministicBiComputation({
-            query: latestUserQuery,
-            normalizedItems: normalized,
-            summary,
-            traces,
-            traceIdPrefix: toolCall.id
-          });
+            toolResults.push({
+              tool_call_id: toolCall.id,
+              output: {
+                board_id: boardId,
+                cursor: itemsPage.cursor,
+                filters: bi.filters,
+                pipeline_metrics: bi.metrics,
+                filtered_count: bi.filteredCount,
+                normalization_summary: summary
+              }
+            });
+          } else if (toolName === "search_board_items") {
+            const boardId = String(args.board_id);
+            const columnId =
+              typeof args.column_id === "string" ? args.column_id : undefined;
+            const value = String(args.value);
 
-          toolResults.push({
-            tool_call_id: toolCall.id,
-            output: {
-              board_id: boardId,
-              cursor: itemsPage.cursor,
-              filters: bi.filters,
-              pipeline_metrics: bi.metrics,
-              filtered_count: bi.filteredCount,
-              normalization_summary: summary
-            }
-          });
-        } else if (toolName === "search_board_items") {
-          const boardId = String(args.board_id);
-          const columnId =
-            typeof args.column_id === "string" ? args.column_id : undefined;
-          const value = String(args.value);
+            const matches = await searchBoardItems({
+              boardId,
+              columnId,
+              value
+            });
 
-          const matches = await searchBoardItems({
-            boardId,
-            columnId,
-            value
-          });
+            const { normalized, summary } = normalizeItems(matches);
+            traces.push({
+              ...traceBase,
+              endpoint: "monday.com GraphQL: boards.items_page (search/filter)",
+              success: true,
+              rawSample: matches.slice(0, 3),
+              normalizationSummary: summary
+            });
 
-          const { normalized, summary } = normalizeItems(matches);
-          traces.push({
-            ...traceBase,
-            endpoint: "monday.com GraphQL: boards.items_page (search/filter)",
-            success: true,
-            rawSample: matches.slice(0, 3),
-            normalizationSummary: summary
-          });
+            const bi = runDeterministicBiComputation({
+              query: latestUserQuery,
+              normalizedItems: normalized,
+              summary,
+              traces,
+              traceIdPrefix: toolCall.id
+            });
 
-          const bi = runDeterministicBiComputation({
-            query: latestUserQuery,
-            normalizedItems: normalized,
-            summary,
-            traces,
-            traceIdPrefix: toolCall.id
-          });
+            toolResults.push({
+              tool_call_id: toolCall.id,
+              output: {
+                board_id: boardId,
+                filters: bi.filters,
+                pipeline_metrics: bi.metrics,
+                filtered_count: bi.filteredCount,
+                normalization_summary: summary
+              }
+            });
+          } else if (toolName === "get_board_columns") {
+            const boardId = String(args.board_id);
+            const cols = await getBoardColumns(boardId);
 
-          toolResults.push({
-            tool_call_id: toolCall.id,
-            output: {
-              board_id: boardId,
-              filters: bi.filters,
-              pipeline_metrics: bi.metrics,
-              filtered_count: bi.filteredCount,
-              normalization_summary: summary
-            }
-          });
-        } else if (toolName === "get_board_columns") {
-          const boardId = String(args.board_id);
-          const cols = await getBoardColumns(boardId);
+            traces.push({
+              ...traceBase,
+              endpoint: "monday.com GraphQL: boards.columns",
+              success: true,
+              rawSample: cols
+            });
 
-          traces.push({
-            ...traceBase,
-            endpoint: "monday.com GraphQL: boards.columns",
-            success: true,
-            rawSample: cols
-          });
+            toolResults.push({
+              tool_call_id: toolCall.id,
+              output: { columns: cols }
+            });
+          } else if (toolName === "get_board_groups") {
+            const boardId = String(args.board_id);
+            const groups = await getBoardGroups(boardId);
 
-          toolResults.push({
-            tool_call_id: toolCall.id,
-            output: { columns: cols }
-          });
-        } else if (toolName === "get_board_groups") {
-          const boardId = String(args.board_id);
-          const groups = await getBoardGroups(boardId);
+            traces.push({
+              ...traceBase,
+              endpoint: "monday.com GraphQL: boards.groups",
+              success: true,
+              rawSample: groups
+            });
 
-          traces.push({
-            ...traceBase,
-            endpoint: "monday.com GraphQL: boards.groups",
-            success: true,
-            rawSample: groups
-          });
-
-          toolResults.push({
-            tool_call_id: toolCall.id,
-            output: { groups }
-          });
-        } else {
-          traces.push({
-            ...traceBase,
-            endpoint: "unknown",
-            success: false,
-            error: `Unknown tool: ${toolName}`
-          });
-          toolResults.push({
-            tool_call_id: toolCall.id,
-            output: { error: `Unknown tool: ${toolName}` }
-          });
-        }
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        traces.push({
-          ...traceBase,
-          endpoint: traceBase.endpoint || "monday.com GraphQL",
-          success: false,
-          error: message
-        });
-        toolResults.push({
-          tool_call_id: toolCall.id,
-          output: {
-            error: "Monday.com API call failed. Please check env vars and network. " + message
+            toolResults.push({
+              tool_call_id: toolCall.id,
+              output: { groups }
+            });
+          } else {
+            traces.push({
+              ...traceBase,
+              endpoint: "unknown",
+              success: false,
+              error: `Unknown tool: ${toolName}`
+            });
+            toolResults.push({
+              tool_call_id: toolCall.id,
+              output: { error: `Unknown tool: ${toolName}` }
+            });
           }
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          traces.push({
+            ...traceBase,
+            endpoint: traceBase.endpoint || "monday.com GraphQL",
+            success: false,
+            error: message
+          });
+          toolResults.push({
+            tool_call_id: toolCall.id,
+            output: {
+              error: "Monday.com API call failed. Please check env vars and network. " + message
+            }
+          });
+        }
+      }
+
+      toolLoopMessages.push({
+        role: "assistant",
+        content: assistantMessage.content ?? "",
+        tool_calls: functionToolCalls.map((tc) => ({
+          id: tc.id,
+          type: "function",
+          function: {
+            name: tc.function.name,
+            arguments: tc.function.arguments ?? "{}"
+          }
+        }))
+      });
+
+      for (const tr of toolResults) {
+        toolLoopMessages.push({
+          role: "tool",
+          tool_call_id: tr.tool_call_id,
+          content: JSON.stringify(tr.output)
         });
       }
     }
-
-    toolLoopMessages.push({
-      role: "assistant",
-      content: assistantMessage.content ?? "",
-      tool_calls: functionToolCalls.map((tc) => ({
-        id: tc.id,
-        type: "function",
-        function: {
-          name: tc.function.name,
-          arguments: tc.function.arguments ?? "{}"
-        }
-      }))
-    });
-
-    for (const tr of toolResults) {
-      toolLoopMessages.push({
-        role: "tool",
-        tool_call_id: tr.tool_call_id,
-        content: JSON.stringify(tr.output)
-      });
-    }
+  } catch (err: unknown) {
+    return responseForOpenAIError(err);
   }
 
   if (!resultMessage) {

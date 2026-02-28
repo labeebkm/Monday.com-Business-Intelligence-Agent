@@ -1,22 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { MessageBubble } from "./MessageBubble";
-import { TypingIndicator } from "./TypingIndicator";
-import { ToolCallTraceCard } from "./ToolCallTrace";
-import type { ToolCallTrace } from "@/app/api/chat/route";
-import { cn } from "@/lib/utils";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import type { ToolCallTrace } from "@/app/api/chat/route";
+
+type BoardStatus = "checking" | "connected" | "error";
 
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  typing?: boolean;
   traces?: ToolCallTrace[];
   suggestedFollowUps?: string[];
 };
 
-const suggestedQuestions = [
+const SUGGESTED_QUESTIONS = [
   "Give me a full pipeline overview",
   "How is the Mining sector performing?",
   "What is our billing and receivables health?",
@@ -27,21 +26,195 @@ const suggestedQuestions = [
   "Which completed work orders have not been billed yet?"
 ];
 
+function makeId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function IconSend() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <line x1="22" y1="2" x2="11" y2="13" />
+      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+    </svg>
+  );
+}
+
+function IconMenu() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <line x1="3" y1="18" x2="21" y2="18" />
+    </svg>
+  );
+}
+
+function IconChevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      style={{ transform: open ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s" }}
+    >
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
+
+function IconSpark() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+    </svg>
+  );
+}
+
+function StatusDot({ status }: { status: BoardStatus }) {
+  const colorMap: Record<BoardStatus, string> = {
+    connected: "#22c55e",
+    checking: "#f59e0b",
+    error: "#ef4444"
+  };
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        width: 7,
+        height: 7,
+        borderRadius: "50%",
+        background: colorMap[status],
+        boxShadow: status === "connected" ? `0 0 6px ${colorMap.connected}80` : "none",
+        animation: status === "checking" ? "pulse 1.5s infinite" : "none"
+      }}
+    />
+  );
+}
+
+function TypingDots() {
+  return (
+    <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            background: "var(--accent)",
+            animation: "typingBounce 1.3s infinite ease-in-out",
+            animationDelay: `${i * 0.16}s`
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function TraceCard({ trace }: { trace: ToolCallTrace }) {
+  const [open, setOpen] = useState(false);
+  const normalized = trace.normalizationSummary;
+
+  return (
+    <div
+      style={{
+        marginTop: 8,
+        border: "1px solid var(--border-subtle)",
+        borderRadius: 8,
+        background: "var(--surface-2)",
+        overflow: "hidden"
+      }}
+    >
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%",
+          background: "none",
+          border: "none",
+          color: "var(--text-secondary)",
+          padding: "8px 10px",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          cursor: "pointer",
+          textAlign: "left"
+        }}
+      >
+        <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <span style={{ color: "var(--accent)", flexShrink: 0 }}>
+            <IconSpark />
+          </span>
+          <span style={{ fontWeight: 600, fontFamily: "var(--font-mono)", flexShrink: 0 }}>
+            {trace.name}
+          </span>
+          <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            - {trace.endpoint}
+          </span>
+        </span>
+        <IconChevron open={open} />
+      </button>
+      {open && (
+        <div style={{ borderTop: "1px solid var(--border-subtle)", padding: 10, fontSize: 11 }}>
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontWeight: 600, marginBottom: 4, color: "var(--text-primary)" }}>Parameters</div>
+            <pre
+              style={{
+                margin: 0,
+                padding: 8,
+                borderRadius: 6,
+                border: "1px solid var(--border-subtle)",
+                background: "var(--surface-0)",
+                color: "var(--text-secondary)",
+                overflow: "auto"
+              }}
+            >
+              {JSON.stringify(trace.args, null, 2)}
+            </pre>
+          </div>
+          {normalized && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <span className="bi-pill">rows: {normalized.totalItems}</span>
+              <span className="bi-pill">nulls: {normalized.nullValues}</span>
+              <span className="bi-pill">dates: {normalized.normalizedDates}</span>
+              <span className="bi-pill">numbers: {normalized.normalizedNumbers}</span>
+            </div>
+          )}
+          {trace.error && <div style={{ color: "#ef4444" }}>{trace.error}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ChatInterface() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [dealsStatus, setDealsStatus] = useState<"checking" | "connected" | "error">(
-    "checking"
-  );
-  const [workOrdersStatus, setWorkOrdersStatus] = useState<
-    "checking" | "connected" | "error"
-  >("checking");
+  const [dealsStatus, setDealsStatus] = useState<BoardStatus>("checking");
+  const [workOrdersStatus, setWorkOrdersStatus] = useState<BoardStatus>("checking");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 960px)");
+    const sync = () => setSidebarOpen(!media.matches);
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
 
   useEffect(() => {
     const checkBoard = async (
       boardKind: "deals" | "work_orders",
-      setStatus: (s: "checking" | "connected" | "error") => void
+      setStatus: (status: BoardStatus) => void
     ) => {
       try {
         const res = await fetch("/api/monday", {
@@ -49,11 +222,7 @@ export function ChatInterface() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ boardKind })
         });
-        if (res.ok) {
-          setStatus("connected");
-        } else {
-          setStatus("error");
-        }
+        setStatus(res.ok ? "connected" : "error");
       } catch {
         setStatus("error");
       }
@@ -63,343 +232,529 @@ export function ChatInterface() {
     void checkBoard("work_orders", setWorkOrdersStatus);
   }, []);
 
-  const handleSend = async (text?: string) => {
-    const content = (text ?? input).trim();
-    if (!content || loading) return;
-    setInput("");
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
 
-    const userMessage: ChatMessage = {
-      id: String(Date.now()),
-      role: "user",
-      content
-    };
+  const sendMessage = useCallback(
+    async (text?: string) => {
+      const content = (text ?? input).trim();
+      if (!content || loading) return;
+      setInput("");
 
-    const assistantId = String(Date.now() + 1);
-
-    setMessages((prev) => [
-      ...prev,
-      userMessage,
-      {
+      const userMessage: ChatMessage = { id: makeId(), role: "user", content };
+      const assistantId = makeId();
+      const placeholder: ChatMessage = {
         id: assistantId,
         role: "assistant",
         content: "",
+        typing: true,
         traces: [],
         suggestedFollowUps: []
-      }
-    ]);
-    setLoading(true);
+      };
 
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [...messages, userMessage].map((m) => ({
-            role: m.role,
-            content: m.content
-          }))
-        })
-      });
+      const requestMessages = [
+        ...messages.filter((m) => !m.typing).map((m) => ({ role: m.role, content: m.content })),
+        { role: userMessage.role, content: userMessage.content }
+      ];
 
-      if (!res.ok) {
-        const errorText = await res.text();
-        const errorMsg =
-          "The BI agent ran into an error while calling Monday.com or OpenAI. " +
-          "Please check your env vars and try again.\n\n" +
-          errorText;
+      setMessages((prev) => [...prev, userMessage, placeholder]);
+      setLoading(true);
+
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: requestMessages })
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error(errText || "Chat request failed.");
+        }
+
+        if (!res.body) {
+          throw new Error("No response body from chat endpoint.");
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+        let done = false;
+        let tracesApplied = false;
+
+        while (!done) {
+          const { done: streamDone, value } = await reader.read();
+          if (streamDone) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload) continue;
+
+            if (payload === "[DONE]") {
+              done = true;
+              break;
+            }
+
+            if (payload.startsWith("TRACES:") && !tracesApplied) {
+              try {
+                const parsed = JSON.parse(payload.slice("TRACES:".length)) as {
+                  traces?: ToolCallTrace[];
+                  suggestedFollowUps?: string[];
+                };
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId
+                      ? {
+                          ...msg,
+                          traces: parsed.traces ?? [],
+                          suggestedFollowUps: parsed.suggestedFollowUps ?? []
+                        }
+                      : msg
+                  )
+                );
+                tracesApplied = true;
+              } catch {
+                // Keep streaming even if trace payload is malformed.
+              }
+              continue;
+            }
+
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantId
+                  ? {
+                      ...msg,
+                      content: (msg.content ?? "") + payload
+                    }
+                  : msg
+              )
+            );
+          }
+        }
 
         setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId
+          prev.map((msg) => (msg.id === assistantId ? { ...msg, typing: false } : msg))
+        );
+      } catch (err: unknown) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantId
               ? {
-                  ...m,
-                  content: errorMsg
+                  ...msg,
+                  typing: false,
+                  content:
+                    "The BI agent ran into an error while calling Monday.com or OpenAI.\n\n" +
+                    errorMessage(err)
                 }
-              : m
+              : msg
           )
         );
-        return;
+      } finally {
+        setLoading(false);
       }
+    },
+    [input, loading, messages]
+  );
 
-      if (!res.body) {
-        throw new Error("No response body from chat endpoint");
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let buffer = "";
-      let tracesApplied = false;
-
-      // Protocol:
-      // data: TRACES:<json>\n\n
-      // data: <chunk>\n\n
-      // ...
-      // data: [DONE]\n\n
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
-
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim();
-          if (!payload) continue;
-
-          if (payload === "[DONE]") {
-            break;
-          }
-
-          if (payload.startsWith("TRACES:") && !tracesApplied) {
-            const jsonStr = payload.slice("TRACES:".length);
-            try {
-              const parsed = JSON.parse(jsonStr) as {
-                traces: ToolCallTrace[];
-                suggestedFollowUps?: string[];
-              };
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? {
-                        ...m,
-                        traces: parsed.traces ?? [],
-                        suggestedFollowUps: parsed.suggestedFollowUps ?? []
-                      }
-                    : m
-                )
-              );
-              tracesApplied = true;
-            } catch {
-              // Ignore malformed trace payloads
-            }
-            continue;
-          }
-
-          // Treat as content chunk
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId
-                ? {
-                    ...m,
-                    content: (m.content ?? "") + payload
-                  }
-                : m
-            )
-          );
-        }
-      }
-    } catch (err: any) {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId
-            ? {
-                ...m,
-                content:
-                  "Network error while contacting the BI agent. Please check your connection and try again.\n\n" +
-                  (err?.message ?? String(err))
-              }
-            : m
-        )
-      );
-    } finally {
-      setLoading(false);
-    }
+  const resetConversation = () => {
+    setMessages([]);
+    setInput("");
+    inputRef.current?.focus();
   };
 
-  const hasMessages = messages.length > 0;
   const lastAssistantIndex = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
       if (messages[i].role === "assistant") return i;
     }
     return -1;
   }, [messages]);
 
-  const resetConversation = () => {
-    setMessages([]);
-    setInput("");
-  };
-
-  const renderStatusDot = (status: "checking" | "connected" | "error") => {
-    const base = "inline-flex h-2 w-2 rounded-full";
-    if (status === "checking") {
-      return <span className={cn(base, "bg-gray-500 animate-pulse")} />;
+  const latestSummary = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const traces = messages[i].traces ?? [];
+      for (const trace of traces) {
+        if (trace.normalizationSummary) return trace.normalizationSummary;
+      }
     }
-    if (status === "connected") {
-      return <span className={cn(base, "bg-emerald-500 animate-pulse")} />;
-    }
-    return <span className={cn(base, "bg-red-500")} />;
-  };
+    return null;
+  }, [messages]);
 
   return (
-    <div className="flex h-screen">
-      <aside className="hidden md:flex flex-col w-64 bg-sidebar border-r border-gray-800 p-4">
-        <div className="mb-6">
-          <h1 className="text-sm font-semibold text-gray-200">Monday BI Agent</h1>
-          <p className="text-[11px] text-gray-500">
-            Founder-level insights over your Monday.com pipeline and work orders.
-          </p>
-        </div>
-        <div className="space-y-3 text-sm">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="font-medium text-gray-100">Deals Board</div>
-              <div className="text-[11px] text-gray-500 truncate">
-                {dealsStatus === "connected"
-                  ? "Live connection"
-                  : dealsStatus === "checking"
-                  ? "Checking connection…"
-                  : "Not connected"}
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=JetBrains+Mono:wght@400;600&family=DM+Sans:wght@400;500;600&display=swap');
+
+        :root {
+          --bg: #070a0f;
+          --surface-0: #0c0f16;
+          --surface-1: #111520;
+          --surface-2: #161b28;
+          --border: #1e2535;
+          --border-subtle: #181f30;
+          --accent: #6366f1;
+          --accent-2: #818cf8;
+          --accent-dim: rgba(99,102,241,0.12);
+          --text-primary: #f1f5f9;
+          --text-secondary: #94a3b8;
+          --text-muted: #475569;
+          --font-display: 'Syne', sans-serif;
+          --font-body: 'DM Sans', sans-serif;
+          --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        .bi-shell { background: var(--bg); color: var(--text-primary); font-family: var(--font-body); }
+        .bi-scroll::-webkit-scrollbar { width: 4px; height: 4px; }
+        .bi-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+        .bi-chip:hover { background: var(--accent-dim); border-color: var(--accent); color: var(--text-primary); }
+        .bi-follow:hover { background: var(--accent); color: #fff; }
+        .bi-send:hover { transform: translateY(-1px); }
+        .bi-pill {
+          padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border-subtle);
+          color: var(--text-secondary); background: var(--surface-1); font-family: var(--font-mono);
+        }
+
+        .bi-md h2, .bi-md h3 { font-family: var(--font-display); margin: 10px 0 6px; }
+        .bi-md h2 { font-size: 15px; }
+        .bi-md h3 { font-size: 13px; }
+        .bi-md p { margin: 4px 0; color: var(--text-secondary); }
+        .bi-md ul { margin: 6px 0 6px 18px; color: var(--text-secondary); }
+        .bi-md table { width: 100%; border-collapse: collapse; margin: 10px 0; border: 1px solid var(--border-subtle); }
+        .bi-md th, .bi-md td { border-bottom: 1px solid var(--border-subtle); padding: 7px 9px; font-size: 12px; text-align: left; }
+        .bi-md th { background: var(--accent-dim); color: var(--accent); }
+        .bi-md tr:last-child td { border-bottom: none; }
+
+        @keyframes typingBounce { 0%,60%,100% { transform: translateY(0);} 30% { transform: translateY(-5px);} }
+        @keyframes pulse { 0%,100% { opacity: 1;} 50% { opacity: 0.4;} }
+        @keyframes spin { from { stroke-dashoffset: 60; } to { stroke-dashoffset: -60; } }
+
+        @media (max-width: 960px) {
+          .bi-header-pad, .bi-chat-pad, .bi-input-pad { padding-left: 14px !important; padding-right: 14px !important; }
+        }
+      `}</style>
+
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 0,
+          pointerEvents: "none",
+          backgroundImage:
+            "linear-gradient(rgba(99,102,241,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(99,102,241,0.04) 1px, transparent 1px)",
+          backgroundSize: "40px 40px"
+        }}
+      />
+
+      <div className="bi-shell" style={{ position: "relative", zIndex: 1, display: "flex", height: "100vh" }}>
+        <aside
+          style={{
+            width: sidebarOpen ? 240 : 0,
+            minWidth: sidebarOpen ? 240 : 0,
+            overflow: "hidden",
+            transition: "width 0.25s ease, min-width 0.25s ease",
+            background: "var(--surface-0)",
+            borderRight: "1px solid var(--border)",
+            display: "flex",
+            flexDirection: "column"
+          }}
+        >
+          <div style={{ padding: 16, borderBottom: "1px solid var(--border)" }}>
+            <div style={{ fontFamily: "var(--font-display)", fontWeight: 700, fontSize: 14 }}>Monday BI Agent</div>
+            <div style={{ color: "var(--text-muted)", fontSize: 11 }}>Live pipeline intelligence</div>
+          </div>
+          <div style={{ padding: 14, borderBottom: "1px solid var(--border)" }}>
+            <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--text-muted)", marginBottom: 8 }}>
+              Data Sources
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+              <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>Deals Board</span>
+              <StatusDot status={dealsStatus} />
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>Work Orders</span>
+              <StatusDot status={workOrdersStatus} />
+            </div>
+          </div>
+          <div style={{ padding: 14, borderBottom: "1px solid var(--border)" }}>
+            <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--text-muted)", marginBottom: 8 }}>
+              Quick View
+            </div>
+            <div className="bi-pill" style={{ marginBottom: 6 }}>rows: {latestSummary?.totalItems ?? "--"}</div>
+            <div className="bi-pill">nulls: {latestSummary?.nullValues ?? "--"}</div>
+          </div>
+          <div style={{ padding: 14 }}>
+            <button
+              onClick={resetConversation}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 8,
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: "1px solid var(--border-subtle)",
+                background: "none",
+                color: "var(--text-secondary)",
+                cursor: "pointer"
+              }}
+            >
+              <IconMenu />
+              New conversation
+            </button>
+          </div>
+          <div style={{ marginTop: "auto", padding: 14, borderTop: "1px solid var(--border)", fontSize: 11, color: "var(--text-muted)" }}>
+            Live Monday.com data - no cache
+          </div>
+        </aside>
+
+        <main className="bi-scroll" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+          <header
+            className="bi-header-pad"
+            style={{
+              height: 56,
+              padding: "0 22px",
+              borderBottom: "1px solid var(--border)",
+              background: "var(--surface-0)",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center"
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button
+                onClick={() => setSidebarOpen((v) => !v)}
+                style={{
+                  border: "1px solid var(--border-subtle)",
+                  background: "none",
+                  borderRadius: 6,
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  width: 30,
+                  height: 30,
+                  display: "grid",
+                  placeItems: "center"
+                }}
+              >
+                <IconMenu />
+              </button>
+              <div>
+                <div style={{ fontFamily: "var(--font-display)", fontWeight: 700 }}>Founder BI Assistant</div>
+                <div style={{ color: "var(--text-muted)", fontSize: 11 }}>Natural language over live Monday data</div>
               </div>
             </div>
-            {renderStatusDot(dealsStatus)}
-          </div>
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="font-medium text-gray-100">Work Orders Board</div>
-              <div className="text-[11px] text-gray-500 truncate">
-                {workOrdersStatus === "connected"
-                  ? "Live connection"
-                  : workOrdersStatus === "checking"
-                  ? "Checking connection…"
-                  : "Not connected"}
-              </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <StatusDot status={dealsStatus === "connected" && workOrdersStatus === "connected" ? "connected" : "checking"} />
+              <span style={{ color: "#22c55e", fontSize: 11 }}>
+                {dealsStatus === "connected" && workOrdersStatus === "connected" ? "Live" : "Connecting"}
+              </span>
             </div>
-            {renderStatusDot(workOrdersStatus)}
-          </div>
-        </div>
-        <div className="mt-6 flex flex-col gap-2">
-          <button
-            type="button"
-            onClick={resetConversation}
-            className="text-[11px] px-3 py-1 rounded-md border border-gray-700 text-gray-200 hover:bg-gray-900 bg-transparent"
-          >
-            New conversation
-          </button>
-          <a
-            href="/decision-log"
-            className="text-[11px] text-gray-500 hover:text-gray-200 underline underline-offset-2"
-          >
-            Decision Log
-          </a>
-        </div>
-        <div className="mt-auto pt-4 text-[11px] text-gray-600 border-t border-gray-800">
-          Live Monday.com calls only. No data is cached.
-        </div>
-      </aside>
+          </header>
 
-      <main className="flex-1 flex flex-col bg-background">
-        <div className="flex-1 flex flex-col max-w-4xl mx-auto w-full px-4 py-4">
-          <div className="mb-3">
-            <h2 className="text-base font-semibold text-gray-100">
-              Founder BI assistant
-            </h2>
-            <p className="text-xs text-gray-500">
-              Ask natural questions about your pipeline and work orders. I&apos;ll call
-              Monday.com live and handle messy data for you.
-            </p>
-          </div>
-
-          {!hasMessages && (
-            <div className="mb-4 flex flex-wrap gap-2">
-              {suggestedQuestions.map((q) => (
-                <button
-                  key={q}
-                  type="button"
-                  className="text-xs px-3 py-1 rounded-full border border-gray-700 bg-card/60 hover:bg-gray-900 text-gray-200"
-                  onClick={() => handleSend(q)}
-                >
-                  {q}
-                </button>
-              ))}
-            </div>
-          )}
-
-          <div className="flex-1 overflow-y-auto border border-gray-800 rounded-lg bg-black/20 p-4 mb-3">
-            {messages.map((m, index) => (
-              <div key={m.id} className="mb-1">
-                <MessageBubble role={m.role}>
-                  {m.role === "assistant" ? (
-                    <div className="prose prose-invert prose-sm max-w-none">
-                      <ReactMarkdown>{m.content}</ReactMarkdown>
-                    </div>
-                  ) : (
-                    <div className="whitespace-pre-wrap">{m.content}</div>
-                  )}
-                </MessageBubble>
-                {m.role === "assistant" && m.traces && m.traces.length > 0 && (
-                  <div className={cn("ml-0 md:ml-4 max-w-[80%]")}>
-                    {m.traces.map((t) => (
-                      <ToolCallTraceCard key={t.id} trace={t} />
+          <div className="bi-chat-pad bi-scroll" style={{ flex: 1, overflow: "auto", padding: "20px 22px" }}>
+            {messages.length === 0 ? (
+              <div style={{ height: "100%", display: "grid", placeItems: "center" }}>
+                <div style={{ maxWidth: 760, textAlign: "center" }}>
+                  <div style={{ margin: "0 auto 12px", width: 56, height: 56, borderRadius: 14, background: "linear-gradient(135deg, var(--accent), var(--accent-2))", display: "grid", placeItems: "center" }}>
+                    <IconSpark />
+                  </div>
+                  <h1 style={{ fontFamily: "var(--font-display)", fontSize: 28, marginBottom: 8 }}>Ask about your business data</h1>
+                  <p style={{ color: "var(--text-muted)", marginBottom: 20 }}>
+                    Live insights from Deals and Work Orders with trace visibility and deterministic metrics.
+                  </p>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
+                    {SUGGESTED_QUESTIONS.map((question) => (
+                      <button
+                        key={question}
+                        className="bi-chip"
+                        onClick={() => void sendMessage(question)}
+                        style={{
+                          padding: "8px 12px",
+                          borderRadius: 999,
+                          border: "1px solid var(--border)",
+                          background: "var(--surface-1)",
+                          color: "var(--text-secondary)",
+                          cursor: "pointer",
+                          transition: "all 0.15s"
+                        }}
+                      >
+                        {question}
+                      </button>
                     ))}
                   </div>
-                )}
-                {m.role === "assistant" &&
-                  index === lastAssistantIndex &&
-                  m.suggestedFollowUps &&
-                  m.suggestedFollowUps.length > 0 && (
-                    <div className="mt-2 ml-0 md:ml-4 flex flex-wrap gap-2">
-                      {m.suggestedFollowUps.map((q) => (
-                        <button
-                          key={q}
-                          type="button"
-                          className="text-[11px] px-3 py-1 rounded-full border border-gray-700 bg-card/60 hover:bg-gray-900 text-gray-200"
-                          onClick={() => handleSend(q)}
-                        >
-                          {q}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-              </div>
-            ))}
-            {loading && <TypingIndicator />}
-            {!hasMessages && !loading && (
-              <div className="h-full flex items-center justify-center">
-                <div className="text-center max-w-md text-xs text-gray-400">
-                  <div className="mb-2 text-sm font-semibold text-gray-100">
-                    Ask founder-level BI questions
-                  </div>
-                  <p className="mb-2">
-                    I&apos;ll pull live data from your Monday.com Deals and Work Orders
-                    boards, normalize messy values, and give you concise, executive-ready
-                    insights.
-                  </p>
-                  <p>
-                    Try asking about pipeline health, at-risk deals, revenue by sector, or
-                    the value of open work orders.
-                  </p>
                 </div>
+              </div>
+            ) : (
+              <div style={{ maxWidth: 780, margin: "0 auto", width: "100%" }}>
+                {messages.map((message, index) => {
+                  const isUser = message.role === "user";
+                  const isLastAssistant = index === lastAssistantIndex;
+                  return (
+                    <div key={message.id} style={{ display: "flex", flexDirection: "column", alignItems: isUser ? "flex-end" : "flex-start", marginBottom: 14 }}>
+                      {!isUser && (
+                        <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4, color: "var(--text-muted)", fontSize: 11 }}>
+                          <IconSpark />
+                          BI Agent
+                        </div>
+                      )}
+                      <div
+                        style={{
+                          maxWidth: isUser ? "72%" : "88%",
+                          borderRadius: isUser ? "14px 14px 4px 14px" : "4px 14px 14px 14px",
+                          padding: isUser ? "10px 14px" : "13px 14px",
+                          background: isUser ? "linear-gradient(135deg, var(--accent), var(--accent-2))" : "var(--surface-1)",
+                          border: isUser ? "none" : "1px solid var(--border-subtle)"
+                        }}
+                      >
+                        {message.typing ? (
+                          <TypingDots />
+                        ) : isUser ? (
+                          <div style={{ whiteSpace: "pre-wrap" }}>{message.content}</div>
+                        ) : (
+                          <div className="bi-md">
+                            <ReactMarkdown>{message.content}</ReactMarkdown>
+                          </div>
+                        )}
+                      </div>
+                      {!isUser && message.traces && message.traces.length > 0 && !message.typing && (
+                        <div style={{ width: "88%" }}>
+                          {message.traces.map((trace) => (
+                            <TraceCard key={trace.id} trace={trace} />
+                          ))}
+                        </div>
+                      )}
+                      {!isUser &&
+                        isLastAssistant &&
+                        message.suggestedFollowUps &&
+                        message.suggestedFollowUps.length > 0 &&
+                        !message.typing && (
+                          <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "88%" }}>
+                            {message.suggestedFollowUps.map((question) => (
+                              <button
+                                key={question}
+                                className="bi-follow"
+                                onClick={() => void sendMessage(question)}
+                                style={{
+                                  padding: "4px 10px",
+                                  borderRadius: 999,
+                                  border: "1px solid var(--accent)",
+                                  background: "var(--accent-dim)",
+                                  color: "var(--accent)",
+                                  cursor: "pointer",
+                                  transition: "all 0.15s"
+                                }}
+                              >
+                                {question}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                    </div>
+                  );
+                })}
+                <div ref={bottomRef} />
               </div>
             )}
           </div>
 
-          <form
-            className="flex items-center gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void handleSend();
-            }}
-          >
-            <input
-              className="flex-1 rounded-md border border-gray-800 bg-black/40 px-3 py-2 text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none focus:ring-1 focus:ring-accent"
-              placeholder="Ask something like “How's our pipeline looking for the energy sector this quarter?”"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-            />
-            <button
-              type="submit"
-              disabled={loading}
-              className="px-4 py-2 rounded-md bg-accent text-xs font-medium text-white hover:bg-accentSoft disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {loading ? "Thinking..." : "Send"}
-            </button>
-          </form>
-        </div>
-      </main>
-    </div>
+          <div className="bi-input-pad" style={{ padding: "14px 22px 18px", borderTop: "1px solid var(--border)", background: "var(--surface-0)" }}>
+            <div style={{ maxWidth: 780, margin: "0 auto" }}>
+              {messages.length > 0 && !loading && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                  {SUGGESTED_QUESTIONS.slice(0, 4).map((question) => (
+                    <button
+                      key={question}
+                      className="bi-chip"
+                      onClick={() => void sendMessage(question)}
+                      style={{
+                        padding: "4px 10px",
+                        borderRadius: 999,
+                        border: "1px solid var(--border-subtle)",
+                        background: "var(--surface-1)",
+                        color: "var(--text-muted)",
+                        cursor: "pointer",
+                        transition: "all 0.15s"
+                      }}
+                    >
+                      {question}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      void sendMessage();
+                    }
+                  }}
+                  onInput={(e) => {
+                    const target = e.currentTarget;
+                    target.style.height = "auto";
+                    target.style.height = `${Math.min(target.scrollHeight, 120)}px`;
+                  }}
+                  placeholder="Ask about pipeline health, receivables, sector performance, or work orders..."
+                  rows={1}
+                  style={{
+                    flex: 1,
+                    resize: "none",
+                    maxHeight: 120,
+                    borderRadius: 12,
+                    border: "1px solid var(--border)",
+                    background: "var(--surface-1)",
+                    color: "var(--text-primary)",
+                    fontSize: 14,
+                    padding: "11px 13px",
+                    lineHeight: 1.5
+                  }}
+                />
+                <button
+                  className="bi-send"
+                  onClick={() => void sendMessage()}
+                  disabled={loading || !input.trim()}
+                  style={{
+                    width: 44,
+                    height: 44,
+                    borderRadius: 12,
+                    border: "none",
+                    display: "grid",
+                    placeItems: "center",
+                    cursor: loading || !input.trim() ? "not-allowed" : "pointer",
+                    transition: "all 0.2s",
+                    color: loading || !input.trim() ? "var(--text-muted)" : "#fff",
+                    background:
+                      loading || !input.trim()
+                        ? "var(--surface-2)"
+                        : "linear-gradient(135deg, var(--accent), var(--accent-2))"
+                  }}
+                >
+                  {loading ? (
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray="60" style={{ animation: "spin 1s linear infinite" }}>
+                      <circle cx="12" cy="12" r="10" />
+                    </svg>
+                  ) : (
+                    <IconSend />
+                  )}
+                </button>
+              </div>
+              <div style={{ marginTop: 7, textAlign: "center", fontSize: 11, color: "var(--text-muted)" }}>
+                Live Monday.com data - Enter to send - Shift+Enter for new line
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </>
   );
 }
-
