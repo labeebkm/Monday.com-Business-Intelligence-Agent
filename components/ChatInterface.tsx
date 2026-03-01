@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { ToolCallTrace } from "@/app/api/chat/route";
 
@@ -245,17 +245,113 @@ function TraceCard({ trace }: { trace: ToolCallTrace }) {
   );
 }
 
+function TypingIndicator() {
+  return (
+    <div style={{ display: "flex", justifyContent: "flex-start", marginTop: 12 }}>
+      <div
+        style={{
+          borderRadius: "4px 14px 14px 14px",
+          padding: "10px 14px",
+          background: "var(--surface-1)",
+          border: "1px solid var(--border-subtle)",
+          maxWidth: "88%"
+        }}
+      >
+        <TypingDots />
+      </div>
+    </div>
+  );
+}
+
+const MessageList = memo(function MessageList({
+  messages,
+  loading,
+  lastAssistantIndex,
+  onFollowUp
+}: {
+  messages: ChatMessage[];
+  loading: boolean;
+  lastAssistantIndex: number;
+  onFollowUp: (q: string) => void;
+}) {
+  return (
+    <>
+      {messages.map((m, index) => {
+        const isUser = m.role === "user";
+        const isLastAssistant = index === lastAssistantIndex;
+        return (
+          <div key={m.id} style={{ display: "flex", flexDirection: "column", alignItems: isUser ? "flex-end" : "flex-start", marginBottom: 14 }}>
+            {!isUser && (
+              <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4, color: "var(--text-muted)", fontSize: 11 }}>
+                <IconSpark />
+                BI Agent
+              </div>
+            )}
+            <div
+              style={{
+                maxWidth: isUser ? "72%" : "88%",
+                borderRadius: isUser ? "14px 14px 4px 14px" : "4px 14px 14px 14px",
+                padding: isUser ? "10px 14px" : "13px 14px",
+                background: isUser ? "linear-gradient(135deg, var(--accent), var(--accent-2))" : "var(--surface-1)",
+                border: isUser ? "none" : "1px solid var(--border-subtle)"
+              }}
+            >
+              {m.typing ? (
+                <TypingDots />
+              ) : isUser ? (
+                <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
+              ) : (
+                <div className="bi-md">
+                  <ReactMarkdown>{m.content}</ReactMarkdown>
+                </div>
+              )}
+            </div>
+            {!isUser && m.traces && m.traces.length > 0 && !m.typing && (
+              <div style={{ width: "88%" }}>
+                {m.traces.map((trace) => (
+                  <TraceCard key={trace.id} trace={trace} />
+                ))}
+              </div>
+            )}
+            {!isUser &&
+              isLastAssistant &&
+              m.suggestedFollowUps &&
+              m.suggestedFollowUps.length > 0 &&
+              !m.typing && (
+                <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "88%" }}>
+                  {m.suggestedFollowUps.map((question) => (
+                    <button
+                      key={question}
+                      className="bi-follow"
+                      onClick={() => onFollowUp(question)}
+                      style={{
+                        padding: "4px 10px",
+                        borderRadius: 999,
+                        border: "1px solid var(--accent)",
+                        background: "var(--accent-dim)",
+                        color: "var(--accent)",
+                        cursor: "pointer",
+                        transition: "all 0.15s"
+                      }}
+                    >
+                      {question}
+                    </button>
+                  ))}
+                </div>
+              )}
+          </div>
+        );
+      })}
+      {loading && <TypingIndicator />}
+    </>
+  );
+});
 export function ChatInterface() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [dealsStatus, setDealsStatus] = useState<BoardStatus>("checking");
   const [workOrdersStatus, setWorkOrdersStatus] = useState<BoardStatus>("checking");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [dealsRows, setDealsRows] = useState<number | null>(null);
-  const [dealsNulls, setDealsNulls] = useState<number | null>(null);
-  const [woRows, setWoRows] = useState<number | null>(null);
-  const [woNulls, setWoNulls] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -289,111 +385,14 @@ export function ChatInterface() {
   }, []);
 
   useEffect(() => {
-    const fetchBoardStats = async () => {
-      try {
-        const [dealsRes, woRes] = await Promise.all([
-          fetch("/api/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              messages: [
-                {
-                  role: "user",
-                  content:
-                    "fetch board stats only: call get_board_items for the deals board and return only the total item count and null count. Do not explain anything."
-                }
-              ]
-            })
-          }),
-          fetch("/api/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              messages: [
-                {
-                  role: "user",
-                  content:
-                    "fetch board stats only: call get_board_items for the work orders board and return only the total item count and null count. Do not explain anything."
-                }
-              ]
-            })
-          })
-        ]);
-
-        const processStream = async (res: Response) => {
-          if (!res.body) return null;
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          let stats = { rows: 0, nulls: 0 };
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const parts = buffer.split("\n\n");
-            buffer = parts.pop() ?? "";
-
-            for (const part of parts) {
-              const line = part.trim();
-              if (!line.startsWith("data:")) continue;
-              const payload = line.slice(5).trim();
-              if (payload.startsWith("TRACES:")) {
-                try {
-                  const parsed = JSON.parse(payload.slice("TRACES:".length)) as {
-                    traces?: Array<{
-                      normalizationSummary?: {
-                        totalItems?: number;
-                        nullValues?: number;
-                      };
-                    }>;
-                  };
-                  const trace = parsed.traces?.find((t) => t.normalizationSummary);
-                  if (trace?.normalizationSummary) {
-                    stats = {
-                      rows: trace.normalizationSummary.totalItems ?? 0,
-                      nulls: trace.normalizationSummary.nullValues ?? 0
-                    };
-                  }
-                } catch {
-                  // ignore malformed trace payloads
-                }
-              }
-            }
-          }
-          return stats;
-        };
-
-        const [dealsStats, woStats] = await Promise.all([
-          processStream(dealsRes),
-          processStream(woRes)
-        ]);
-
-        if (dealsStats) {
-          setDealsRows(dealsStats.rows);
-          setDealsNulls(dealsStats.nulls);
-        }
-        if (woStats) {
-          setWoRows(woStats.rows);
-          setWoNulls(woStats.nulls);
-        }
-      } catch {
-        // silently fail - stats are non-critical
-      }
-    };
-
-    void fetchBoardStats();
-  }, []);
-
-  useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  const sendMessage = useCallback(
+  const handleSend = useCallback(
     async (text?: string) => {
-      const content = (text ?? input).trim();
+      const content = (text ?? inputRef.current?.value ?? "").trim();
       if (!content || loading) return;
-      setInput("");
+      if (inputRef.current) inputRef.current.value = "";
 
       const userMessage: ChatMessage = { id: makeId(), role: "user", content };
       const assistantId = makeId();
@@ -461,17 +460,22 @@ export function ChatInterface() {
                   traces?: ToolCallTrace[];
                   suggestedFollowUps?: string[];
                 };
+                const parsedTraces = parsed.traces ?? [];
+
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === assistantId
                       ? {
                           ...msg,
-                          traces: parsed.traces ?? [],
+                          traces: parsedTraces,
                           suggestedFollowUps: parsed.suggestedFollowUps ?? []
                         }
                       : msg
                   )
                 );
+
+
+
                 tracesApplied = true;
               } catch {
                 // Keep streaming even if trace payload is malformed.
@@ -503,7 +507,7 @@ export function ChatInterface() {
                   ...msg,
                   typing: false,
                   content:
-                    "The BI agent ran into an error while calling Monday.com or OpenAI.\n\n" +
+                    "The BI agent ran into an error while calling Monday.com or Groq.\n\n" +
                     errorMessage(err)
                 }
               : msg
@@ -513,12 +517,11 @@ export function ChatInterface() {
         setLoading(false);
       }
     },
-    [input, loading, messages]
+    [loading, messages]
   );
 
   const resetConversation = () => {
     setMessages([]);
-    setInput("");
     inputRef.current?.focus();
   };
 
@@ -573,43 +576,6 @@ export function ChatInterface() {
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>Work Orders</span>
               <StatusDot status={workOrdersStatus} />
-            </div>
-          </div>
-          <div style={{ padding: 14, borderBottom: "1px solid var(--border)" }}>
-            <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--text-muted)", marginBottom: 8 }}>
-              Quick View
-            </div>
-            <div className="mt-4 space-y-3 text-xs">
-              <div>
-                <div className="text-gray-400 font-medium mb-1">Deals Board</div>
-                <div className="flex justify-between text-gray-500">
-                  <span>rows:</span>
-                  <span className="font-mono text-gray-300">
-                    {dealsRows !== null ? dealsRows : "—"}
-                  </span>
-                </div>
-                <div className="flex justify-between text-gray-500">
-                  <span>nulls:</span>
-                  <span className="font-mono text-gray-300">
-                    {dealsNulls !== null ? dealsNulls : "—"}
-                  </span>
-                </div>
-              </div>
-              <div>
-                <div className="text-gray-400 font-medium mb-1">Work Orders Board</div>
-                <div className="flex justify-between text-gray-500">
-                  <span>rows:</span>
-                  <span className="font-mono text-gray-300">
-                    {woRows !== null ? woRows : "—"}
-                  </span>
-                </div>
-                <div className="flex justify-between text-gray-500">
-                  <span>nulls:</span>
-                  <span className="font-mono text-gray-300">
-                    {woNulls !== null ? woNulls : "—"}
-                  </span>
-                </div>
-              </div>
             </div>
           </div>
           <div style={{ padding: 14 }}>
@@ -697,7 +663,7 @@ export function ChatInterface() {
                       <button
                         key={question}
                         className="bi-chip"
-                        onClick={() => void sendMessage(question)}
+                        onClick={() => void handleSend(question)}
                         style={{
                           padding: "8px 12px",
                           borderRadius: 999,
@@ -716,72 +682,12 @@ export function ChatInterface() {
               </div>
             ) : (
               <div style={{ maxWidth: 780, margin: "0 auto", width: "100%" }}>
-                {messages.map((message, index) => {
-                  const isUser = message.role === "user";
-                  const isLastAssistant = index === lastAssistantIndex;
-                  return (
-                    <div key={message.id} style={{ display: "flex", flexDirection: "column", alignItems: isUser ? "flex-end" : "flex-start", marginBottom: 14 }}>
-                      {!isUser && (
-                        <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4, color: "var(--text-muted)", fontSize: 11 }}>
-                          <IconSpark />
-                          BI Agent
-                        </div>
-                      )}
-                      <div
-                        style={{
-                          maxWidth: isUser ? "72%" : "88%",
-                          borderRadius: isUser ? "14px 14px 4px 14px" : "4px 14px 14px 14px",
-                          padding: isUser ? "10px 14px" : "13px 14px",
-                          background: isUser ? "linear-gradient(135deg, var(--accent), var(--accent-2))" : "var(--surface-1)",
-                          border: isUser ? "none" : "1px solid var(--border-subtle)"
-                        }}
-                      >
-                        {message.typing ? (
-                          <TypingDots />
-                        ) : isUser ? (
-                          <div style={{ whiteSpace: "pre-wrap" }}>{message.content}</div>
-                        ) : (
-                          <div className="bi-md">
-                            <ReactMarkdown>{message.content}</ReactMarkdown>
-                          </div>
-                        )}
-                      </div>
-                      {!isUser && message.traces && message.traces.length > 0 && !message.typing && (
-                        <div style={{ width: "88%" }}>
-                          {message.traces.map((trace) => (
-                            <TraceCard key={trace.id} trace={trace} />
-                          ))}
-                        </div>
-                      )}
-                      {!isUser &&
-                        isLastAssistant &&
-                        message.suggestedFollowUps &&
-                        message.suggestedFollowUps.length > 0 &&
-                        !message.typing && (
-                          <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "88%" }}>
-                            {message.suggestedFollowUps.map((question) => (
-                              <button
-                                key={question}
-                                className="bi-follow"
-                                onClick={() => void sendMessage(question)}
-                                style={{
-                                  padding: "4px 10px",
-                                  borderRadius: 999,
-                                  border: "1px solid var(--accent)",
-                                  background: "var(--accent-dim)",
-                                  color: "var(--accent)",
-                                  cursor: "pointer",
-                                  transition: "all 0.15s"
-                                }}
-                              >
-                                {question}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                    </div>
-                  );
-                })}
+                <MessageList
+                  messages={messages}
+                  loading={loading}
+                  lastAssistantIndex={lastAssistantIndex}
+                  onFollowUp={(q) => void handleSend(q)}
+                />
                 <div ref={bottomRef} />
               </div>
             )}
@@ -795,7 +701,7 @@ export function ChatInterface() {
                     <button
                       key={question}
                       className="bi-chip"
-                      onClick={() => void sendMessage(question)}
+                      onClick={() => void handleSend(question)}
                       style={{
                         padding: "4px 10px",
                         borderRadius: 999,
@@ -814,12 +720,11 @@ export function ChatInterface() {
               <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
                 <textarea
                   ref={inputRef}
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
+                  defaultValue=""
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
-                      void sendMessage();
+                      void handleSend();
                     }
                   }}
                   onInput={(e) => {
@@ -844,8 +749,8 @@ export function ChatInterface() {
                 />
                 <button
                   className="bi-send"
-                  onClick={() => void sendMessage()}
-                  disabled={loading || !input.trim()}
+                  onClick={() => void handleSend()}
+                  disabled={loading}
                   style={{
                     width: 44,
                     height: 44,
@@ -853,11 +758,11 @@ export function ChatInterface() {
                     border: "none",
                     display: "grid",
                     placeItems: "center",
-                    cursor: loading || !input.trim() ? "not-allowed" : "pointer",
+                    cursor: loading ? "not-allowed" : "pointer",
                     transition: "all 0.2s",
-                    color: loading || !input.trim() ? "var(--text-muted)" : "#fff",
+                    color: loading ? "var(--text-muted)" : "#fff",
                     background:
-                      loading || !input.trim()
+                      loading
                         ? "var(--surface-2)"
                         : "linear-gradient(135deg, var(--accent), var(--accent-2))"
                   }}
@@ -881,3 +786,9 @@ export function ChatInterface() {
     </>
   );
 }
+
+
+
+
+
+

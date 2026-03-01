@@ -83,6 +83,58 @@ function getLatestUserQuery(messages: ClientMessage[]): string {
   return "";
 }
 
+function isStatsOnlyPrefetchQuery(query: string): boolean {
+  return /fetch board stats only/i.test(query);
+}
+
+function detectStatsBoardKind(query: string): "deals" | "work_orders" | null {
+  const q = query.toLowerCase();
+  if (q.includes("work orders") || q.includes("work order")) return "work_orders";
+  if (q.includes("deals board") || q.includes("deals")) return "deals";
+  return null;
+}
+
+function getBoardIdForKind(kind: "deals" | "work_orders"): string {
+  const boardId =
+    kind === "deals" ? process.env.DEALS_BOARD_ID : process.env.WORK_ORDERS_BOARD_ID;
+
+  if (!boardId) {
+    throw new Error(
+      `Missing board ID for ${kind === "deals" ? "deals" : "work orders"} board.`
+    );
+  }
+
+  return boardId;
+}
+
+function createSseResponse(args: {
+  message: string;
+  traces: ToolCallTrace[];
+  suggestedFollowUps?: string[];
+}): Response {
+  const { message, traces, suggestedFollowUps } = args;
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    start(controller) {
+      const metaPayload = JSON.stringify({ traces, suggestedFollowUps });
+      controller.enqueue(encoder.encode(`data: TRACES:${metaPayload}\n\n`));
+      controller.enqueue(encoder.encode(`data: ${message}\n\n`));
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    }
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive"
+    }
+  });
+}
+
 function quarterLabel(quarter: { year: number; quarter: number }): string {
   return `Q${quarter.quarter} ${quarter.year}`;
 }
@@ -187,10 +239,6 @@ function isFunctionToolCall(value: unknown): value is LlmToolCall {
   );
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function parseOpenAIError(err: unknown): {
   status: number;
   code?: string;
@@ -199,7 +247,7 @@ function parseOpenAIError(err: unknown): {
 } {
   const fallback = {
     status: 500,
-    message: "OpenAI request failed unexpectedly."
+    message: "Groq request failed unexpectedly."
   };
 
   if (!err || typeof err !== "object") {
@@ -213,46 +261,12 @@ function parseOpenAIError(err: unknown): {
   const message =
     e.message ??
     e.error?.message ??
-    "OpenAI request failed. Please check API key, quota, and network.";
+    "Groq request failed. Please check API key, quota, and network.";
 
   return { status, code, type, message };
 }
 
-function shouldRetryOpenAI(err: unknown, attempt: number, maxRetries: number): boolean {
-  if (attempt >= maxRetries) return false;
-  const parsed = parseOpenAIError(err);
-
-  // Quota exhaustion should not be retried.
-  if (parsed.code === "insufficient_quota" || parsed.type === "insufficient_quota") {
-    return false;
-  }
-
-  // Retry transient rate limits and service instability.
-  return parsed.status === 429 || parsed.status >= 500;
-}
-
-async function createChatCompletionWithRetry(
-  openaiClient: ReturnType<typeof getOpenAIClient>,
-  request: Record<string, unknown>
-) {
-  const maxRetries = 2;
-  let attempt = 0;
-  let delayMs = 500;
-
-  while (true) {
-    try {
-      return await openaiClient.chat.completions.create(request as any);
-    } catch (err: unknown) {
-      if (!shouldRetryOpenAI(err, attempt, maxRetries)) {
-        throw err;
-      }
-
-      await sleep(delayMs);
-      attempt += 1;
-      delayMs *= 2;
-    }
-  }
-}
+// Note: retry wrapper removed to avoid extra Groq calls on transient failures.
 
 function responseForOpenAIError(err: unknown): Response {
   const parsed = parseOpenAIError(err);
@@ -263,22 +277,22 @@ function responseForOpenAIError(err: unknown): Response {
   if (parsed.code === "insufficient_quota" || parsed.type === "insufficient_quota") {
     status = 429;
     error =
-      "OpenAI quota exceeded for this API key. Update billing/limits or use a key with available quota.";
+      "Groq quota exceeded for this API key. Update billing/limits or use a key with available quota.";
   } else if (parsed.status === 429) {
     status = 429;
-    error = "OpenAI rate limit reached. Please retry in a few seconds.";
+    error = "Groq rate limit reached. Please retry in a few seconds.";
   } else if (parsed.status === 401) {
     status = 401;
-    error = "OpenAI authentication failed. Check OPENAI_API_KEY.";
+    error = "Groq authentication failed. Check GROQ_API_KEY.";
   } else if (parsed.status >= 500) {
     status = 503;
-    error = "OpenAI service is temporarily unavailable. Please retry shortly.";
+    error = "Groq service is temporarily unavailable. Please retry shortly.";
   }
 
   return new Response(
     JSON.stringify({
       error,
-      provider: "openai",
+      provider: "groq",
       code: parsed.code ?? null,
       type: parsed.type ?? null
     }),
@@ -295,6 +309,49 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: "Invalid payload" }), { status: 400 });
   }
 
+  const messages = body.messages as ClientMessage[];
+  const latestUserQuery = getLatestUserQuery(messages);
+
+  if (isStatsOnlyPrefetchQuery(latestUserQuery)) {
+    const boardKind = detectStatsBoardKind(latestUserQuery);
+    if (boardKind) {
+      try {
+        const boardId = getBoardIdForKind(boardKind);
+        const allItems = await getAllBoardItems({ boardId });
+        const { summary } = normalizeItems(allItems);
+
+        const traces: ToolCallTrace[] = [
+          {
+            id: `stats-prefetch-${boardKind}`,
+            name: "get_board_items",
+            args: { board_id: boardId, stats_only: true },
+            endpoint: "monday.com GraphQL: boards.items_page (all pages)",
+            success: true,
+            rawSample: allItems.slice(0, 3),
+            normalizationSummary: summary
+          }
+        ];
+
+        return createSseResponse({
+          message: `rows: ${summary.totalItems}, nulls: ${summary.nullValues}`,
+          traces
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        return new Response(
+          JSON.stringify({
+            error: "Monday.com API call failed while prefetching board stats. " + message,
+            provider: "monday"
+          }),
+          {
+            status: 502,
+            headers: { "Content-Type": "application/json" }
+          }
+        );
+      }
+    }
+  }
+
   let openaiClient: ReturnType<typeof getOpenAIClient>;
   try {
     openaiClient = getOpenAIClient();
@@ -302,9 +359,6 @@ export async function POST(req: NextRequest) {
     const message = err instanceof Error ? err.message : String(err);
     return new Response(JSON.stringify({ error: message }), { status: 500 });
   }
-
-  const messages = body.messages as ClientMessage[];
-  const latestUserQuery = getLatestUserQuery(messages);
 
   const llmMessages: LlmMessageParam[] = messages.map((m) => ({
     role: m.role,
@@ -325,7 +379,7 @@ export async function POST(req: NextRequest) {
 
   try {
     for (let i = 0; i < 8; i += 1) {
-      const response = await createChatCompletionWithRetry(openaiClient, {
+      const response = await openaiClient.chat.completions.create({
         model: OPENAI_MODEL,
         max_tokens: 4096,
         temperature: 0,
@@ -336,7 +390,7 @@ export async function POST(req: NextRequest) {
 
       const assistantMessage = response.choices?.[0]?.message;
       if (!assistantMessage) {
-        throw new Error("OpenAI did not return an assistant message.");
+        throw new Error("Groq did not return an assistant message.");
       }
 
       const toolCalls = assistantMessage.tool_calls ?? [];
@@ -346,7 +400,7 @@ export async function POST(req: NextRequest) {
       }
       const functionToolCalls = toolCalls.filter(isFunctionToolCall);
       if (!functionToolCalls.length) {
-        throw new Error("OpenAI returned tool calls in an unsupported format.");
+        throw new Error("Groq returned tool calls in an unsupported format.");
       }
 
       const toolResults: { tool_call_id: string; output: unknown }[] = [];
@@ -363,7 +417,7 @@ export async function POST(req: NextRequest) {
             id: toolCall.id,
             name: toolName,
             args: {},
-            endpoint: "openai tool-calling",
+            endpoint: "groq tool-calling",
             success: false,
             error: `Invalid tool arguments JSON: ${parseError}`
           });
@@ -431,6 +485,7 @@ export async function POST(req: NextRequest) {
             const { normalized, summary } = normalizeItems(matches);
             traces.push({
               ...traceBase,
+              args: { ...traceBase.args, board_id: boardId },
               endpoint: "monday.com GraphQL: boards.items_page (search/filter)",
               success: true,
               rawSample: matches.slice(0, 3),
@@ -537,7 +592,25 @@ export async function POST(req: NextRequest) {
       }
     }
   } catch (err: unknown) {
-    return responseForOpenAIError(err);
+    const message = err instanceof Error ? err.message : String(err);
+    const isRateLimit = message.toLowerCase().includes("rate limit") || 
+                        message.toLowerCase().includes("rate_limit") ||
+                        (err as any)?.status === 429;
+    
+    if (isRateLimit) {
+      return new Response(
+        JSON.stringify({ 
+          error: "Rate limit reached. Please wait 15 seconds and try again.",
+          retryAfter: 15 
+        }),
+        { status: 429 }
+      );
+    }
+    
+    return new Response(
+      JSON.stringify({ error: message }),
+      { status: 500 }
+    );
   }
 
   if (!resultMessage) {
@@ -545,7 +618,7 @@ export async function POST(req: NextRequest) {
       "I attempted several Monday.com API calls but could not reach a final answer within the tool-calling limit. Please try narrowing your question or rephrasing it.";
   }
 
-  // One more small OpenAI call to suggest contextual follow-ups.
+  // One more small Groq call to suggest contextual follow-ups.
   let suggestedFollowUps: string[] | undefined;
   try {
     const followupResponse = await openaiClient.chat.completions.create({
@@ -577,30 +650,12 @@ export async function POST(req: NextRequest) {
     // If the follow-up call itself fails, we still return the main answer.
   }
 
-  const encoder = new TextEncoder();
-
-  const stream = new ReadableStream({
-    start(controller) {
-      // First send traces and suggested follow-ups as a JSON payload prefix.
-      const metaPayload = JSON.stringify({ traces, suggestedFollowUps });
-      controller.enqueue(encoder.encode(`data: TRACES:${metaPayload}\n\n`));
-
-      // Then stream the assistant message body. Here we send it as a single chunk,
-      // but keeping the protocol chunk-based allows future incremental streaming.
-      controller.enqueue(encoder.encode(`data: ${resultMessage}\n\n`));
-
-      // Signal completion.
-      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      controller.close();
-    }
-  });
-
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive"
-    }
+  return createSseResponse({
+    message: resultMessage,
+    traces,
+    suggestedFollowUps
   });
 }
+
+
+
