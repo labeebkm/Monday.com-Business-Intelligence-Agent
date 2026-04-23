@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monday.com BI Agent — Architecture</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0e1a;
+    --surface: #111827;
+    --surface2: #1a2235;
+    --border: #1e2d45;
+    --accent: #00e5c0;
+    --accent2: #3b82f6;
+    --accent3: #f59e0b;
+    --accent4: #a855f7;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --groq: #ff6b35;
+    --monday: #ff3d57;
+    --bi: #00e5c0;
+    --next: #ffffff;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Animated background grid */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(0,229,192,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,229,192,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .page {
+    position: relative;
+    z-index: 1;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 48px 32px 80px;
+  }
+
+  /* HEADER */
+  .header {
+    text-align: center;
+    margin-bottom: 64px;
+    animation: fadeDown 0.8s ease both;
+  }
+
+  .header-badge {
+    display: inline-block;
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 3px;
+    color: var(--accent);
+    border: 1px solid rgba(0,229,192,0.3);
+    padding: 6px 16px;
+    border-radius: 2px;
+    margin-bottom: 20px;
+    text-transform: uppercase;
+  }
+
+  .header h1 {
+    font-family: 'Space Mono', monospace;
+    font-size: clamp(22px, 4vw, 38px);
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.2;
+    margin-bottom: 12px;
+  }
+
+  .header h1 span { color: var(--accent); }
+
+  .header p {
+    font-size: 15px;
+    color: var(--muted);
+    font-weight: 300;
+  }
+
+  /* TECH STACK PILLS */
+  .tech-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 24px;
+    animation: fadeDown 0.8s 0.2s ease both;
+  }
+
+  .tech-pill {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    padding: 5px 14px;
+    border-radius: 2px;
+    border: 1px solid;
+    letter-spacing: 1px;
+  }
+
+  .pill-groq   { color: var(--groq);   border-color: rgba(255,107,53,0.4);   background: rgba(255,107,53,0.08); }
+  .pill-monday { color: var(--monday); border-color: rgba(255,61,87,0.4);    background: rgba(255,61,87,0.08); }
+  .pill-next   { color: #fff;          border-color: rgba(255,255,255,0.2);  background: rgba(255,255,255,0.05); }
+  .pill-ts     { color: var(--accent2);border-color: rgba(59,130,246,0.4);   background: rgba(59,130,246,0.08); }
+  .pill-vercel { color: var(--muted);  border-color: rgba(100,116,139,0.4);  background: rgba(100,116,139,0.08); }
+
+  /* MAIN ARCHITECTURE FLOW */
+  .arch-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    animation: fadeUp 0.8s 0.3s ease both;
+  }
+
+  /* ROW LAYOUT */
+  .arch-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    position: relative;
+  }
+
+  /* BLOCKS */
+  .block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    position: relative;
+    transition: all 0.3s ease;
+    cursor: default;
+  }
+
+  .block:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
+
+  .block-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+
+  .block-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 4px;
+  }
+
+  .block-sub {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .block-icon {
+    font-size: 22px;
+    margin-bottom: 8px;
+  }
+
+  /* Block color variants */
+  .block-user     { border-color: rgba(255,255,255,0.15); }
+  .block-user .block-label { color: var(--muted); }
+  .block-user:hover { border-color: rgba(255,255,255,0.3); }
+
+  .block-nextjs   { border-color: rgba(255,255,255,0.2); }
+  .block-nextjs .block-label { color: rgba(255,255,255,0.5); }
+  .block-nextjs:hover { border-color: rgba(255,255,255,0.4); box-shadow: 0 8px 32px rgba(255,255,255,0.05); }
+
+  .block-groq     { border-color: rgba(255,107,53,0.4); background: rgba(255,107,53,0.05); }
+  .block-groq .block-label { color: var(--groq); }
+  .block-groq:hover { border-color: rgba(255,107,53,0.7); box-shadow: 0 8px 32px rgba(255,107,53,0.15); }
+
+  .block-monday   { border-color: rgba(255,61,87,0.4); background: rgba(255,61,87,0.05); }
+  .block-monday .block-label { color: var(--monday); }
+  .block-monday:hover { border-color: rgba(255,61,87,0.7); box-shadow: 0 8px 32px rgba(255,61,87,0.15); }
+
+  .block-bi       { border-color: rgba(0,229,192,0.35); background: rgba(0,229,192,0.04); }
+  .block-bi .block-label { color: var(--bi); }
+  .block-bi:hover { border-color: rgba(0,229,192,0.6); box-shadow: 0 8px 32px rgba(0,229,192,0.1); }
+
+  .block-normalize { border-color: rgba(168,85,247,0.35); background: rgba(168,85,247,0.04); }
+  .block-normalize .block-label { color: var(--accent4); }
+  .block-normalize:hover { border-color: rgba(168,85,247,0.6); box-shadow: 0 8px 32px rgba(168,85,247,0.1); }
+
+  .block-sse { border-color: rgba(59,130,246,0.35); background: rgba(59,130,246,0.04); }
+  .block-sse .block-label { color: var(--accent2); }
+  .block-sse:hover { border-color: rgba(59,130,246,0.6); box-shadow: 0 8px 32px rgba(59,130,246,0.1); }
+
+  /* ARROWS */
+  .arrow-v {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    padding: 4px 0;
+  }
+
+  .arrow-line {
+    width: 2px;
+    height: 28px;
+    background: linear-gradient(to bottom, var(--border), var(--accent));
+    opacity: 0.6;
+  }
+
+  .arrow-head {
+    width: 0;
+    height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top: 8px solid var(--accent);
+    opacity: 0.6;
+  }
+
+  .arrow-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 1px;
+    text-align: center;
+    margin: 4px 0;
+  }
+
+  .arrow-h {
+    display: flex;
+    align-items: center;
+    padding: 0 4px;
+    flex-shrink: 0;
+  }
+
+  .arrow-h-line {
+    height: 2px;
+    width: 28px;
+    background: linear-gradient(to right, var(--border), var(--accent));
+    opacity: 0.5;
+  }
+
+  .arrow-h-head {
+    width: 0;
+    height: 0;
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+    border-left: 7px solid var(--accent);
+    opacity: 0.5;
+  }
+
+  /* LOOP BOX */
+  .loop-box {
+    border: 1px dashed rgba(255,107,53,0.4);
+    border-radius: 12px;
+    padding: 28px 24px 24px;
+    position: relative;
+    background: rgba(255,107,53,0.02);
+    margin: 8px 0;
+  }
+
+  .loop-badge {
+    position: absolute;
+    top: -12px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg);
+    border: 1px solid rgba(255,107,53,0.4);
+    color: var(--groq);
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    padding: 4px 16px;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+
+  /* TOOL GRID */
+  .tools-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin: 12px 0;
+  }
+
+  .tool-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    text-align: center;
+    transition: all 0.2s;
+    cursor: default;
+  }
+
+  .tool-card:hover {
+    border-color: rgba(255,107,53,0.5);
+    background: rgba(255,107,53,0.06);
+    transform: translateY(-2px);
+  }
+
+  .tool-card-name {
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    color: var(--groq);
+    margin-bottom: 4px;
+    letter-spacing: 0.5px;
+  }
+
+  .tool-card-desc {
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+
+  /* BOARDS ROW */
+  .boards-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 12px 0;
+  }
+
+  .board-card {
+    background: var(--surface2);
+    border: 1px solid rgba(255,61,87,0.25);
+    border-radius: 6px;
+    padding: 14px 16px;
+    transition: all 0.2s;
+    cursor: default;
+  }
+
+  .board-card:hover {
+    border-color: rgba(255,61,87,0.5);
+    transform: translateY(-2px);
+  }
+
+  .board-name {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    color: var(--monday);
+    margin-bottom: 6px;
+  }
+
+  .board-cols {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .col-tag {
+    font-size: 10px;
+    background: rgba(255,61,87,0.1);
+    border: 1px solid rgba(255,61,87,0.2);
+    color: #ff8a9a;
+    padding: 2px 8px;
+    border-radius: 2px;
+    font-family: 'Space Mono', monospace;
+  }
+
+  /* NORMALIZE ROW */
+  .normalize-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin: 12px 0;
+  }
+
+  .norm-card {
+    background: var(--surface2);
+    border: 1px solid rgba(168,85,247,0.2);
+    border-radius: 6px;
+    padding: 10px 12px;
+    text-align: center;
+    transition: all 0.2s;
+  }
+
+  .norm-card:hover { border-color: rgba(168,85,247,0.5); transform: translateY(-2px); }
+
+  .norm-icon { font-size: 18px; margin-bottom: 4px; }
+  .norm-label { font-size: 11px; color: var(--accent4); font-family: 'Space Mono', monospace; }
+  .norm-example { font-size: 10px; color: var(--muted); margin-top: 3px; }
+
+  /* BI METRICS */
+  .metrics-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin: 12px 0;
+  }
+
+  .metric-card {
+    background: var(--surface2);
+    border: 1px solid rgba(0,229,192,0.2);
+    border-radius: 6px;
+    padding: 10px 14px;
+    transition: all 0.2s;
+  }
+
+  .metric-card:hover { border-color: rgba(0,229,192,0.5); transform: translateY(-2px); }
+  .metric-name { font-family: 'Space Mono', monospace; font-size: 10px; color: var(--bi); margin-bottom: 3px; }
+  .metric-val  { font-size: 11px; color: var(--muted); }
+
+  /* SSE CHUNKS */
+  .sse-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin: 12px 0;
+  }
+
+  .sse-chunk {
+    background: var(--surface2);
+    border: 1px solid rgba(59,130,246,0.2);
+    border-radius: 6px;
+    padding: 10px 14px;
+    transition: all 0.2s;
+  }
+
+  .sse-chunk:hover { border-color: rgba(59,130,246,0.5); transform: translateY(-2px); }
+  .sse-chunk-label { font-family: 'Space Mono', monospace; font-size: 10px; color: var(--accent2); margin-bottom: 3px; }
+  .sse-chunk-val   { font-size: 11px; color: var(--muted); }
+
+  /* BIDIRECTIONAL LOOP ARROW */
+  .loop-arrow-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 8px 0;
+  }
+
+  .loop-arrow-label {
+    font-size: 11px;
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  .double-arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .da-line {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+  }
+
+  .da-send { color: var(--groq); }
+  .da-recv { color: var(--accent2); }
+
+  /* SECTION TITLE */
+  .section-title {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    padding-left: 4px;
+    border-left: 2px solid var(--border);
+    padding-left: 10px;
+  }
+
+  /* LEGEND */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    justify-content: center;
+    margin-top: 48px;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    animation: fadeUp 0.8s 0.6s ease both;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .legend-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* FOOTER NOTE */
+  .footer-note {
+    text-align: center;
+    margin-top: 32px;
+    font-size: 12px;
+    color: var(--muted);
+    font-family: 'Space Mono', monospace;
+    animation: fadeUp 0.8s 0.8s ease both;
+  }
+
+  /* ANIMATIONS */
+  @keyframes fadeDown {
+    from { opacity: 0; transform: translateY(-20px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* RESPONSIVE */
+  @media (max-width: 768px) {
+    .tools-grid, .normalize-row { grid-template-columns: repeat(2, 1fr); }
+    .metrics-row, .sse-row { grid-template-columns: repeat(2, 1fr); }
+    .boards-row { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- HEADER -->
+  <div class="header">
+    <div class="header-badge">System Architecture</div>
+    <h1>Monday.com <span>BI Agent</span></h1>
+    <p>Skylark Drones — Conversational Business Intelligence over Live Monday.com Data</p>
+    <div class="tech-row">
+      <span class="tech-pill pill-next">Next.js 14 App Router</span>
+      <span class="tech-pill pill-ts">TypeScript</span>
+      <span class="tech-pill pill-groq">Groq · llama-3.3-70b-versatile</span>
+      <span class="tech-pill pill-monday">Monday.com GraphQL API v2</span>
+      <span class="tech-pill pill-vercel">Vercel</span>
+    </div>
+  </div>
+
+  <!-- ARCHITECTURE FLOW -->
+  <div class="arch-container">
+
+    <!-- 1. USER -->
+    <div class="arch-row">
+      <div class="block block-user" style="width:320px; text-align:center;">
+        <div class="block-icon">👤</div>
+        <div class="block-label">Entry Point</div>
+        <div class="block-title">Founder / Executive</div>
+        <div class="block-sub">Types a natural language question<br><em style="color:#94a3b8">"What are total deals in Mining sector this quarter?"</em></div>
+      </div>
+    </div>
+
+    <div class="arrow-v">
+      <div class="arrow-line"></div>
+      <div class="arrow-label">HTTP request</div>
+      <div class="arrow-head"></div>
+    </div>
+
+    <!-- 2. NEXT.JS -->
+    <div class="arch-row">
+      <div class="block block-nextjs" style="width:520px;">
+        <div class="block-label">Frontend + API Layer</div>
+        <div class="block-title">Next.js 14 App Router</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px;">
+          <div style="background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:10px 12px;">
+            <div style="font-family:'Space Mono',monospace; font-size:10px; color:#94a3b8; margin-bottom:4px;">FRONTEND</div>
+            <div style="font-size:12px; color:#fff;">ChatInterface.tsx</div>
+            <div style="font-size:11px; color:var(--muted);">React chat UI · ToolCallTrace · SSE reader</div>
+          </div>
+          <div style="background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:10px 12px;">
+            <div style="font-family:'Space Mono',monospace; font-size:10px; color:#94a3b8; margin-bottom:4px;">API ROUTES</div>
+            <div style="font-size:12px; color:#fff;">/api/chat &nbsp;·&nbsp; /api/monday</div>
+            <div style="font-size:11px; color:var(--muted);">Serverless Node.js on Vercel</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-v">
+      <div class="arrow-line"></div>
+      <div class="arrow-label">POST /api/chat</div>
+      <div class="arrow-head"></div>
+    </div>
+
+    <!-- 3. TOOL CALLING LOOP -->
+    <div class="arch-row">
+      <div style="width:100%; max-width:900px;">
+        <div class="loop-box">
+          <div class="loop-badge">⟳ &nbsp;AGENTIC TOOL-CALLING LOOP &nbsp;·&nbsp; MAX 8 ITERATIONS</div>
+
+          <!-- Groq block -->
+          <div class="section-title" style="margin-bottom:12px;">Step A — LLM Decision (Groq)</div>
+          <div class="block block-groq" style="margin-bottom:10px;">
+            <div class="block-label">LLM Provider · LPU Hardware</div>
+            <div class="block-title">Groq — llama-3.3-70b-versatile</div>
+            <div class="block-sub" style="margin-bottom:12px;">Receives full conversation history + system prompt + tool definitions. Decides: call a tool OR return final answer. Temperature: 0 (fully deterministic).</div>
+            <div class="section-title">Available Tools (sent to Groq every iteration)</div>
+            <div class="tools-grid">
+              <div class="tool-card">
+                <div class="tool-card-name">get_board_items</div>
+                <div class="tool-card-desc">Fetches ALL items via cursor pagination loop</div>
+              </div>
+              <div class="tool-card">
+                <div class="tool-card-name">search_board_items</div>
+                <div class="tool-card-desc">Keyword filter over fetched items</div>
+              </div>
+              <div class="tool-card">
+                <div class="tool-card-name">get_board_columns</div>
+                <div class="tool-card-desc">Returns board schema / column structure</div>
+              </div>
+              <div class="tool-card">
+                <div class="tool-card-name">get_board_groups</div>
+                <div class="tool-card-desc">Returns pipeline stage names</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bidirectional arrow -->
+          <div style="display:flex; align-items:center; justify-content:center; gap:24px; padding:10px 0; margin-bottom:10px;">
+            <div style="flex:1; height:1px; background:var(--border);"></div>
+            <div style="text-align:center;">
+              <div style="font-family:'Space Mono',monospace; font-size:10px; color:var(--groq); margin-bottom:3px;">→ &nbsp;tool_calls: [{ name, arguments }]</div>
+              <div style="font-family:'Space Mono',monospace; font-size:10px; color:var(--accent2);">← &nbsp;{ pipeline_metrics, normalization_summary }</div>
+            </div>
+            <div style="flex:1; height:1px; background:var(--border);"></div>
+          </div>
+
+          <!-- Monday.com block -->
+          <div class="section-title" style="margin-bottom:12px;">Step B — Live Data Fetch (Monday.com)</div>
+          <div class="block block-monday" style="margin-bottom:10px;">
+            <div class="block-label">External API · No Caching · GraphQL v2</div>
+            <div class="block-title">Monday.com GraphQL API</div>
+            <div class="block-sub" style="margin-bottom:12px;">Your server executes the tool Groq requested. getAllBoardItems loops through all cursor pages until null — complete dataset every time. Exponential backoff on 429/5xx (3 retries, 500ms → 1s → 2s).</div>
+            <div class="boards-row">
+              <div class="board-card">
+                <div class="board-name">📋 Deals Board</div>
+                <div class="board-cols">
+                  <span class="col-tag">stage/status</span>
+                  <span class="col-tag">deal value ₹</span>
+                  <span class="col-tag">sector</span>
+                  <span class="col-tag">close date</span>
+                  <span class="col-tag">owner code</span>
+                </div>
+              </div>
+              <div class="board-card">
+                <div class="board-name">🔧 Work Orders Board</div>
+                <div class="board-cols">
+                  <span class="col-tag">client</span>
+                  <span class="col-tag">exec status</span>
+                  <span class="col-tag">billing ₹</span>
+                  <span class="col-tag">sector</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Normalize block -->
+          <div class="section-title" style="margin-bottom:12px;">Step C — Data Normalization (lib/normalize.ts)</div>
+          <div class="block block-normalize" style="margin-bottom:10px;">
+            <div class="block-label">Data Cleaning Layer</div>
+            <div class="block-title">normalizeItems() — Raw strings → Typed values</div>
+            <div class="block-sub" style="margin-bottom:12px;">Every column value is classified and parsed before any metric is computed. Null values are counted for data quality caveats.</div>
+            <div class="normalize-row">
+              <div class="norm-card">
+                <div class="norm-icon">💰</div>
+                <div class="norm-label">Currency</div>
+                <div class="norm-example">₹12,50,000 → 1250000</div>
+              </div>
+              <div class="norm-card">
+                <div class="norm-icon">📅</div>
+                <div class="norm-label">Date</div>
+                <div class="norm-example">15/04/2024 → ISO 8601</div>
+              </div>
+              <div class="norm-card">
+                <div class="norm-icon">🏷️</div>
+                <div class="norm-label">Status</div>
+                <div class="norm-example">CLOSED WON → closed won</div>
+              </div>
+              <div class="norm-card">
+                <div class="norm-icon">🏭</div>
+                <div class="norm-label">Sector</div>
+                <div class="norm-example">solar → renewables</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- BI block -->
+          <div class="section-title" style="margin-bottom:12px;">Step D — Deterministic Metrics (lib/bi.ts)</div>
+          <div class="block block-bi">
+            <div class="block-label">Business Intelligence Layer · No LLM Arithmetic</div>
+            <div class="block-title">computePipelineMetrics() — Server-computed, injected into Groq tool result</div>
+            <div class="block-sub" style="margin-bottom:12px;">Groq never computes numbers. All aggregates are calculated deterministically here, then handed to the model as facts. extractFiltersFromQuery() detects sector/quarter/status from natural language.</div>
+            <div class="metrics-row">
+              <div class="metric-card">
+                <div class="metric-name">totalDeals</div>
+                <div class="metric-val">Count of filtered items</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-name">totalRevenue</div>
+                <div class="metric-val">Sum of value columns (₹ Cr)</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-name">averageDealSize</div>
+                <div class="metric-val">totalRevenue ÷ totalDeals</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-name">stageCounts</div>
+                <div class="metric-val">{ "proposal": 12, "negotiation": 5 }</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-name">closedDealsCount</div>
+                <div class="metric-val">won + lost + completed</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-name">nullValues</div>
+                <div class="metric-val">Data quality caveat trigger</div>
+              </div>
+            </div>
+          </div>
+
+        </div><!-- end loop-box -->
+      </div>
+    </div>
+
+    <div class="arrow-v">
+      <div class="arrow-line"></div>
+      <div class="arrow-label">Final answer ready</div>
+      <div class="arrow-head"></div>
+    </div>
+
+    <!-- 4. SSE STREAM -->
+    <div class="arch-row">
+      <div class="block block-sse" style="width:100%; max-width:900px;">
+        <div class="block-label">Response Delivery · text/event-stream</div>
+        <div class="block-title">Server-Sent Events (SSE) Stream</div>
+        <div class="block-sub" style="margin-bottom:14px;">Three chunks sent in sequence back to the React frontend. Traces arrive first so the UI can show tool activity before the answer appears.</div>
+        <div class="sse-row">
+          <div class="sse-chunk">
+            <div class="sse-chunk-label">Chunk 1 — TRACES</div>
+            <div class="sse-chunk-val">Tool call history, endpoints hit, normalization summary, follow-up suggestions</div>
+          </div>
+          <div class="sse-chunk">
+            <div class="sse-chunk-label">Chunk 2 — ANSWER</div>
+            <div class="sse-chunk-val">Groq's final natural language response with ₹ values, stage breakdown, data caveat</div>
+          </div>
+          <div class="sse-chunk">
+            <div class="sse-chunk-label">Chunk 3 — [DONE]</div>
+            <div class="sse-chunk-val">Stream termination signal. Frontend stops reading and renders complete UI.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-v">
+      <div class="arrow-line"></div>
+      <div class="arrow-label">Rendered in browser</div>
+      <div class="arrow-head"></div>
+    </div>
+
+    <!-- 5. USER RESPONSE -->
+    <div class="arch-row">
+      <div class="block block-user" style="width:520px; text-align:center;">
+        <div class="block-icon">💬</div>
+        <div class="block-label">Final Output</div>
+        <div class="block-title">Chat UI — Answer + Tool Traces</div>
+        <div class="block-sub">Founder sees the answer with supporting metrics, data quality note, tool call transparency, and 2–3 suggested follow-up questions.</div>
+      </div>
+    </div>
+
+  </div><!-- end arch-container -->
+
+  <!-- LEGEND -->
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:var(--groq)"></div>Groq LLM — Query Planning & Language</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--monday)"></div>Monday.com — Live Data Source</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent4)"></div>normalize.ts — Data Cleaning</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--bi)"></div>bi.ts — Deterministic Metrics</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent2)"></div>SSE Stream — Response Delivery</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#fff"></div>Next.js 14 — Full-stack Framework</div>
+  </div>
+
+  <div class="footer-note">
+    Skylark Drones · Monday.com BI Agent · Built with Next.js 14 + Groq SDK + Monday.com GraphQL API v2
+  </div>
+
+</div>
+</body>
+</html>
